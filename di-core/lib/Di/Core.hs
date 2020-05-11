@@ -15,6 +15,7 @@ module Di.Core
  , throw
  , throw'
  , push
+ , reset
  , filter
  , onException
  , contralevel
@@ -82,6 +83,8 @@ data Di level path msg = Di
     -- be logged.
   , di_send :: Log level path msg -> STM ()
     -- ^ Send a 'Log' for processing.
+  , di_send_base :: Log level path msg -> STM ()
+    -- ^ di_send but push doesn't modify it
   , di_flush :: STM ()
     -- ^ Block until all logs finish being processed.
   , di_logex :: Seq path -> Ex.SomeException -> Maybe (STM ())
@@ -143,11 +146,13 @@ new commit act = do
        <- liftIO STM.newTQueueIO
     tmvWOut :: STM.TMVar Ex.SomeException
        <- liftIO STM.newEmptyTMVarIO
+    let send_base = \x -> STM.tryReadTMVar tmvWOut >>= \case
+          Nothing -> STM.writeTQueue tqLogs x
+          Just ex -> STM.throwSTM ex
     let di = Di { di_filter = \_ _ _ -> True
                 , di_logex = \_ _ -> Just (pure ())
-                , di_send = \x -> STM.tryReadTMVar tmvWOut >>= \case
-                     Nothing -> STM.writeTQueue tqLogs x
-                     Just ex -> STM.throwSTM ex
+                , di_send = send_base
+                , di_send_base = send_base
                 , di_flush = STM.tryReadTMVar tmvWOut >>= \case
                      Nothing -> STM.isEmptyTQueue tqLogs >>= \case
                         True -> pure ()
@@ -501,6 +506,14 @@ push p = \di -> di
   , di_logex = \ps se -> di_logex di (p Seq.<| ps) se }
 {-# INLINABLE push #-}
 
+-- | Reset the @path@ of the 'Di'.
+reset :: Di level path msg -> Di level path msg
+reset = \di -> di
+  { di_send = \x -> di_send_base di x
+  , di_filter = \_ _ _ -> True
+  , di_logex = \_ _ -> Just (pure ()) }
+{-# INLINABLE reset #-}
+
 -- | A 'Di' is contravariant in its @level@ argument.
 --
 -- This function is used to go from a /more general/ to a /more specific/ type
@@ -531,6 +544,7 @@ contralevel
   :: (level -> level') -> Di level' path msg -> Di level path msg
 contralevel f = \di -> di
   { di_send = \x -> di_send di (x { log_level = f (log_level x) })
+  , di_send_base = \x -> di_send_base di (x { log_level = f (log_level x) })
   , di_filter = \l ps m -> di_filter di (f l) ps m }
 {-# INLINABLE contralevel #-}
 
@@ -562,6 +576,7 @@ contralevel f = \di -> di
 contrapath :: (path -> path') -> Di level path' msg -> Di level path msg
 contrapath f = \di -> di
   { di_send = \x -> di_send di (x { log_path = fmap f (log_path x) })
+  , di_send_base = \x -> di_send_base di (x { log_path = fmap f (log_path x) })
   , di_filter = \l ps m -> di_filter di l (fmap f ps) m
   , di_logex = \ps se -> di_logex di (fmap f ps) se
   }
@@ -596,6 +611,7 @@ contramsg
   :: (msg -> msg') -> Di level path msg' -> Di level path msg
 contramsg f = \di -> di
   { di_send = \x -> di_send di (x { log_message = f (log_message x) })
+  , di_send_base = \x -> di_send_base di (x { log_message = f (log_message x) })
   , di_filter = \l ps m -> di_filter di l ps (f m) }
 {-# INLINABLE contramsg #-}
 
